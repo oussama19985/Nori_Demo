@@ -1,4 +1,4 @@
-# app_min.py — minimal multi-turn Streamlit UI + intro FR + boutons de suggestions + reset
+# app_min.py — minimal multi-turn Streamlit UI + intro FR + suggestions + reset
 import json
 import requests
 import streamlit as st
@@ -8,28 +8,29 @@ st.set_page_config(page_title="Nori – KB RAG (Multi-turn)", page_icon="💬", 
 st.title("💬 Nori – Beta")
 
 # ----------------------------
-# Sidebar (réglages rapides)
+# Config (from secrets only)
+# ----------------------------
+API_URL = (st.secrets.get("API_URL", "") or "").strip()
+API_KEY = st.secrets.get("API_KEY", None)  # optional (x-api-key)
+
+# ----------------------------
+# Sidebar
 # ----------------------------
 with st.sidebar:
-    api_url = st.text_input(
-        "Function URL (public)",
-        value=st.secrets.get("API_URL", ""),
-        help="e.g., https://...lambda-url.ca-central-1.on.aws/"
-    )
-    user_id = st.text_input("User ID (pour le filtre metadata)", value=st.secrets.get("USER_ID", "userA"))
-    st.caption("L’app envoie {message, user_id, history[]} à votre Lambda.")
 
-    # 🔁 Reset chat button (no page refresh needed)
+    # user must fill this (no default from secrets)
+    user_id = st.text_input("User ID (requis)", value="", placeholder="ex: userA")
+
+    # reset chat
     if st.button("🧹 Nouvelle conversation", use_container_width=True):
         if "msgs" in st.session_state:
-            del st.session_state["msgs"]      # clear only the conversation
+            del st.session_state["msgs"]
         st.toast("Conversation réinitialisée.")
-        st.rerun()                            # re-run so the intro message shows again
+        st.rerun()
 
     st.divider()
-    st.caption("Astuce : ajoute API_URL / USER_ID / API_KEY dans .streamlit/secrets.toml si besoin.")
-
-API_KEY = st.secrets.get("API_KEY", None)  # optionnel (x-api-key)
+    if not API_URL:
+        st.error("API_URL manquant dans .streamlit/secrets.toml")
 
 # ----------------------------
 # Utils
@@ -50,26 +51,23 @@ def _recent_history(msgs, max_pairs=6):
     for m in msgs:
         if m["role"] in ("user", "assistant"):
             buf.append({"role": m["role"], "content": m["content"]})
-    return buf[-max_pairs*2:]  # dernières paires
+    return buf[-max_pairs * 2:]
 
 # ----------------------------
-# State + Intro du coach
+# State + Intro
 # ----------------------------
 if "msgs" not in st.session_state:
-    st.session_state.msgs = []  # {"role": "user"/"assistant", "content": str, "meta": str|None}
+    st.session_state.msgs = []
 
-# Injecter une salutation initiale si aucune conversation
 if not st.session_state.msgs:
     intro = (
         "Bonjour 👋, je suis **Nori**, ton coach IA pour la remise en forme, la nutrition et le sommeil.\n\n"
-        "Je peux utiliser tes données (si disponibles) pour personnaliser mes conseils. "
-        "Sinon, je te poserai quelques questions ciblées pour adapter le plan.\n\n"
         "_Choisis un objectif pour commencer, ou pose ta question :_"
     )
     st.session_state.msgs.append({"role": "assistant", "content": intro, "meta": None})
 
 # ----------------------------
-# Rendu de l'historique
+# Render history
 # ----------------------------
 for m in st.session_state.msgs:
     with st.chat_message(m["role"]):
@@ -79,7 +77,7 @@ for m in st.session_state.msgs:
                 st.markdown(m["meta"])
 
 # ----------------------------
-# Boutons de suggestions (quick start)
+# Suggestions
 # ----------------------------
 st.divider()
 st.markdown("**Suggestions rapides :**")
@@ -95,41 +93,41 @@ for col, label in zip(cols, suggestions):
         clicked_suggestion = label
 
 # ----------------------------
-# Saisie chat ou clic suggestion
+# Chat input
 # ----------------------------
 user_input = st.chat_input("Pose ta question…")
 if clicked_suggestion and not user_input:
     user_input = clicked_suggestion
 
 if user_input:
-    if not api_url.strip():
+    if not API_URL:
         with st.chat_message("assistant"):
-            st.error("Merci d’indiquer la Function URL (public) dans la barre latérale.")
+            st.error("Configuration invalide : API_URL manquant dans secrets.toml.")
+    elif not user_id.strip():
+        with st.chat_message("assistant"):
+            st.error("Merci de renseigner un **User ID** dans la barre latérale.")
     else:
-        # Afficher le tour utilisateur
+        # show user turn
         st.session_state.msgs.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # Construire la charge utile avec historique
         payload = {
             "message": user_input[:3000],
-            "user_id": (user_id or "userA").strip(),
+            "user_id": user_id.strip(),
             "history": _recent_history(st.session_state.msgs, max_pairs=6),
         }
 
         headers = {"Content-Type": "application/json"}
         if API_KEY:
-            headers["x-api-key"] = API_KEY  # si tu as mis un petit gate côté Lambda
+            headers["x-api-key"] = API_KEY
 
-        # Appel HTTP
         try:
-            r = requests.post(api_url.strip(), headers=headers, data=json.dumps(payload), timeout=60)
+            r = requests.post(API_URL, headers=headers, data=json.dumps(payload), timeout=60)
         except Exception as e:
             with st.chat_message("assistant"):
                 st.error(f"Requête échouée : {type(e).__name__}: {e}")
         else:
-            # Parsing de la réponse Lambda
             answer, sources_md = "_No answer_", None
             if r.status_code == 200:
                 try:
@@ -143,7 +141,9 @@ if user_input:
             else:
                 err = r.text
                 try:
-                    js = r.json(); data = js.get("data", js); err = data.get("error", err)
+                    js = r.json()
+                    data = js.get("data", js)
+                    err = data.get("error", err)
                 except Exception:
                     pass
                 answer = f"Erreur {r.status_code} : {err}"
