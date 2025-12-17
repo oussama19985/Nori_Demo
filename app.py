@@ -79,18 +79,25 @@ for m in st.session_state.msgs:
 # ----------------------------
 # Suggestions
 # ----------------------------
-st.divider()
-st.markdown("**Suggestions rapides :**")
-suggestions = [
-    "Objectif : masse musculaire",
-    "Objectif : perte de poids",
-    "Améliorer mon sommeil/énergie",
-]
-cols = st.columns(len(suggestions))
+# ----------------------------
+# Suggestions (only at the beginning)
+# ----------------------------
 clicked_suggestion = None
-for col, label in zip(cols, suggestions):
-    if col.button(label, use_container_width=True, key=f"sugg_{label}"):
-        clicked_suggestion = label
+
+# show suggestions only when we only have the intro message (no user turn yet)
+if len(st.session_state.msgs) == 1 and st.session_state.msgs[0]["role"] == "assistant":
+    st.divider()
+    st.markdown("**Suggestions rapides :**")
+    suggestions = [
+        "Objectif : masse musculaire",
+        "Objectif : perte de poids",
+        "Améliorer mon sommeil/énergie",
+    ]
+    cols = st.columns(len(suggestions))
+    for col, label in zip(cols, suggestions):
+        if col.button(label, use_container_width=True, key=f"sugg_{label}"):
+            clicked_suggestion = label
+
 
 # ----------------------------
 # Chat input
