@@ -1,4 +1,4 @@
-# app_min.py — minimal multi-turn Streamlit UI + intro FR + suggestions + reset
+# app_min.py — Streamlit chat UI with robust one-time suggestions + spinner
 import json
 import requests
 import streamlit as st
@@ -11,20 +11,16 @@ st.title("💬 Nori – Beta")
 # Config (from secrets only)
 # ----------------------------
 API_URL = (st.secrets.get("API_URL", "") or "").strip()
-API_KEY = st.secrets.get("API_KEY", None)  # optional (x-api-key)
+API_KEY = st.secrets.get("API_KEY", None)
 
 # ----------------------------
 # Sidebar
 # ----------------------------
 with st.sidebar:
-
-    # user must fill this (no default from secrets)
     user_id = st.text_input("User ID (requis)", value="", placeholder="ex: userA")
 
-    # reset chat
     if st.button("🧹 Nouvelle conversation", use_container_width=True):
-        if "msgs" in st.session_state:
-            del st.session_state["msgs"]
+        st.session_state.clear()
         st.toast("Conversation réinitialisée.")
         st.rerun()
 
@@ -54,17 +50,30 @@ def _recent_history(msgs, max_pairs=6):
     return buf[-max_pairs * 2:]
 
 # ----------------------------
-# State + Intro
+# State initialization
 # ----------------------------
 if "msgs" not in st.session_state:
     st.session_state.msgs = []
 
+if "suggestions_used" not in st.session_state:
+    st.session_state.suggestions_used = False
+
+if "pending_input" not in st.session_state:
+    st.session_state.pending_input = None
+
+# ----------------------------
+# Intro message
+# ----------------------------
 if not st.session_state.msgs:
-    intro = (
-        "Bonjour 👋, je suis **Nori**, ton coach IA pour la remise en forme, la nutrition et le sommeil.\n\n"
-        "_Choisis un objectif pour commencer, ou pose ta question :_"
-    )
-    st.session_state.msgs.append({"role": "assistant", "content": intro, "meta": None})
+    st.session_state.msgs.append({
+        "role": "assistant",
+        "content": (
+            "Bonjour 👋, je suis **Nori**, ton coach IA pour la remise en forme, "
+            "la nutrition et le sommeil.\n\n"
+            "_Choisis un objectif pour commencer, ou pose ta question :_"
+        ),
+        "meta": None
+    })
 
 # ----------------------------
 # Render history
@@ -77,15 +86,9 @@ for m in st.session_state.msgs:
                 st.markdown(m["meta"])
 
 # ----------------------------
-# Suggestions
+# One-time suggestions (robust)
 # ----------------------------
-# ----------------------------
-# Suggestions (only at the beginning)
-# ----------------------------
-clicked_suggestion = None
-
-# show suggestions only when we only have the intro message (no user turn yet)
-if len(st.session_state.msgs) == 1 and st.session_state.msgs[0]["role"] == "assistant":
+if not st.session_state.suggestions_used:
     st.divider()
     st.markdown("**Suggestions rapides :**")
     suggestions = [
@@ -96,17 +99,23 @@ if len(st.session_state.msgs) == 1 and st.session_state.msgs[0]["role"] == "assi
     cols = st.columns(len(suggestions))
     for col, label in zip(cols, suggestions):
         if col.button(label, use_container_width=True, key=f"sugg_{label}"):
-            clicked_suggestion = label
-
+            st.session_state.pending_input = label
+            st.session_state.suggestions_used = True
+            st.rerun()
 
 # ----------------------------
-# Chat input
+# Chat input (manual or suggestion)
 # ----------------------------
 user_input = st.chat_input("Pose ta question…")
-if clicked_suggestion and not user_input:
-    user_input = clicked_suggestion
+
+# suggestion click has priority
+if st.session_state.pending_input:
+    user_input = st.session_state.pending_input
+    st.session_state.pending_input = None
 
 if user_input:
+    st.session_state.suggestions_used = True
+
     if not API_URL:
         with st.chat_message("assistant"):
             st.error("Configuration invalide : API_URL manquant dans secrets.toml.")
@@ -114,7 +123,7 @@ if user_input:
         with st.chat_message("assistant"):
             st.error("Merci de renseigner un **User ID** dans la barre latérale.")
     else:
-        # show user turn
+        # show user message
         st.session_state.msgs.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
@@ -122,24 +131,32 @@ if user_input:
         payload = {
             "message": user_input[:3000],
             "user_id": user_id.strip(),
-            "history": _recent_history(st.session_state.msgs, max_pairs=6),
+            "history": _recent_history(st.session_state.msgs),
         }
 
         headers = {"Content-Type": "application/json"}
         if API_KEY:
             headers["x-api-key"] = API_KEY
 
-        try:
-            r = requests.post(API_URL, headers=headers, data=json.dumps(payload), timeout=60)
-        except Exception as e:
-            with st.chat_message("assistant"):
-                st.error(f"Requête échouée : {type(e).__name__}: {e}")
-        else:
+        # assistant response + spinner
+        with st.chat_message("assistant"):
+            with st.spinner("Nori réfléchit…"):
+                try:
+                    r = requests.post(
+                        API_URL,
+                        headers=headers,
+                        data=json.dumps(payload),
+                        timeout=60,
+                    )
+                except Exception as e:
+                    st.error(f"Requête échouée : {type(e).__name__}: {e}")
+                    st.stop()
+
             answer, sources_md = "_No answer_", None
             if r.status_code == 200:
                 try:
                     js = r.json()
-                    data = js.get("data", js) if isinstance(js, dict) else {}
+                    data = js.get("data", js)
                     answer = data.get("answer", answer)
                     hits = data.get("retrievalResults", []) or []
                     sources_md = _format_sources(hits)
@@ -155,10 +172,13 @@ if user_input:
                     pass
                 answer = f"Erreur {r.status_code} : {err}"
 
-            with st.chat_message("assistant"):
-                st.markdown(answer if answer else "_No answer_")
-                if sources_md:
-                    with st.expander("Contexte / Sources"):
-                        st.markdown(sources_md)
+            st.markdown(answer)
+            if sources_md:
+                with st.expander("Contexte / Sources"):
+                    st.markdown(sources_md)
 
-            st.session_state.msgs.append({"role": "assistant", "content": answer, "meta": sources_md})
+        st.session_state.msgs.append({
+            "role": "assistant",
+            "content": answer,
+            "meta": sources_md
+        })
