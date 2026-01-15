@@ -1,4 +1,4 @@
-# app_min.py — Streamlit chat UI with robust one-time suggestions + spinner
+# app_min.py — Streamlit chat UI with User ID + Studio ID selectors (required)
 import json
 import requests
 import streamlit as st
@@ -17,7 +17,10 @@ API_KEY = st.secrets.get("API_KEY", None)
 # Sidebar
 # ----------------------------
 with st.sidebar:
-    user_id = st.text_input("User ID (requis)", value="", placeholder="ex: userA")
+    st.markdown("### Paramètres")
+
+    user_id = st.text_input("User ID (requis)", value="userA", placeholder="ex: userA")
+    studio_id = st.text_input("Studio ID (requis)", value="1001", placeholder="ex: 1001")
 
     if st.button("🧹 Nouvelle conversation", use_container_width=True):
         st.session_state.clear()
@@ -37,17 +40,38 @@ def _format_sources(hits: List[Dict[str, Any]]) -> str:
         meta = h.get("metadata") or {}
         text = (h.get("content") or {}).get("text", "") or ""
         snippet = (text[:600] + "…") if len(text) > 600 else text
-        keys = ["source", "s3Uri", "doc_id", "user_id", "file", "title", "page", "language"]
+
+        keys = [
+            "layer", "studio_id", "user_id", "doc_type",
+            "x-amz-bedrock-kb-source-uri", "x-amz-bedrock-kb-document-page-number",
+            "source", "title", "language"
+        ]
         meta_bits = [f"{k}={meta[k]}" for k in keys if k in meta]
+
         lines.append(f"**#{i}**  {' | '.join(meta_bits)}\n\n{snippet}")
+
     return "\n\n---\n\n".join(lines) if lines else "_No sources returned_"
 
-def _recent_history(msgs, max_pairs=6):
+def _recent_history(msgs: List[Dict[str, Any]], max_pairs: int = 6) -> List[Dict[str, str]]:
     buf = []
     for m in msgs:
-        if m["role"] in ("user", "assistant"):
-            buf.append({"role": m["role"], "content": m["content"]})
+        if m.get("role") in ("user", "assistant"):
+            buf.append({"role": m["role"], "content": m.get("content", "")})
     return buf[-max_pairs * 2:]
+
+def _merge_hits(api_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Your Lambda returns retrievalResults_studio + retrievalResults_user.
+    Keep backward compatibility if only retrievalResults exists.
+    """
+    hits: List[Dict[str, Any]] = []
+    if isinstance(api_data.get("retrievalResults_studio"), list):
+        hits.extend(api_data.get("retrievalResults_studio") or [])
+    if isinstance(api_data.get("retrievalResults_user"), list):
+        hits.extend(api_data.get("retrievalResults_user") or [])
+    if not hits:
+        hits = api_data.get("retrievalResults", []) or []
+    return hits
 
 # ----------------------------
 # State initialization
@@ -86,11 +110,12 @@ for m in st.session_state.msgs:
                 st.markdown(m["meta"])
 
 # ----------------------------
-# One-time suggestions (robust)
+# One-time suggestions
 # ----------------------------
 if not st.session_state.suggestions_used:
     st.divider()
     st.markdown("**Suggestions rapides :**")
+
     suggestions = [
         "Objectif : masse musculaire",
         "Objectif : perte de poids",
@@ -119,66 +144,73 @@ if user_input:
     if not API_URL:
         with st.chat_message("assistant"):
             st.error("Configuration invalide : API_URL manquant dans secrets.toml.")
-    elif not user_id.strip():
+            st.stop()
+
+    if not user_id.strip() or not studio_id.strip():
         with st.chat_message("assistant"):
-            st.error("Merci de renseigner un **User ID** dans la barre latérale.")
-    else:
-        # show user message
-        st.session_state.msgs.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.markdown(user_input)
+            st.error("Merci de renseigner un **User ID** et un **Studio ID** dans la barre latérale.")
+            st.stop()
 
-        payload = {
-            "message": user_input[:3000],
-            "user_id": user_id.strip(),
-            "history": _recent_history(st.session_state.msgs),
-        }
+    # show user message
+    st.session_state.msgs.append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
 
-        headers = {"Content-Type": "application/json"}
-        if API_KEY:
-            headers["x-api-key"] = API_KEY
+    payload = {
+        "message": user_input[:3000],
+        "user_id": user_id.strip(),
+        "studio_id": studio_id.strip(),
+        "history": _recent_history(st.session_state.msgs),
+    }
 
-        # assistant response + spinner
-        with st.chat_message("assistant"):
-            with st.spinner("Nori réfléchit…"):
-                try:
-                    r = requests.post(
-                        API_URL,
-                        headers=headers,
-                        data=json.dumps(payload),
-                        timeout=60,
-                    )
-                except Exception as e:
-                    st.error(f"Requête échouée : {type(e).__name__}: {e}")
-                    st.stop()
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["x-api-key"] = API_KEY
 
-            answer, sources_md = "_No answer_", None
-            if r.status_code == 200:
-                try:
-                    js = r.json()
-                    data = js.get("data", js)
-                    answer = data.get("answer", answer)
-                    hits = data.get("retrievalResults", []) or []
-                    sources_md = _format_sources(hits)
-                except Exception:
-                    answer = f"Corps non-JSON :\n\n```\n{r.text[:1500]}\n```"
-            else:
-                err = r.text
-                try:
-                    js = r.json()
-                    data = js.get("data", js)
-                    err = data.get("error", err)
-                except Exception:
-                    pass
-                answer = f"Erreur {r.status_code} : {err}"
+    # assistant response + spinner
+    with st.chat_message("assistant"):
+        with st.spinner("Nori réfléchit…"):
+            try:
+                r = requests.post(
+                    API_URL,
+                    headers=headers,
+                    data=json.dumps(payload),
+                    timeout=60,
+                )
+            except Exception as e:
+                st.error(f"Requête échouée : {type(e).__name__}: {e}")
+                st.stop()
 
-            st.markdown(answer)
-            if sources_md:
-                with st.expander("Contexte / Sources"):
-                    st.markdown(sources_md)
+        answer = "_No answer_"
+        sources_md = None
 
-        st.session_state.msgs.append({
-            "role": "assistant",
-            "content": answer,
-            "meta": sources_md
-        })
+        if r.status_code == 200:
+            try:
+                js = r.json()
+                data = js.get("data", js)
+
+                answer = data.get("answer", answer)
+                hits = _merge_hits(data)
+                sources_md = _format_sources(hits)
+            except Exception:
+                answer = f"Corps non-JSON :\n\n```\n{r.text[:1500]}\n```"
+        else:
+            err = r.text
+            try:
+                js = r.json()
+                data = js.get("data", js)
+                err = data.get("error", err)
+            except Exception:
+                pass
+            answer = f"Erreur {r.status_code} : {err}"
+
+        st.markdown(answer)
+        if sources_md:
+            with st.expander("Contexte / Sources"):
+                st.markdown(sources_md)
+
+    st.session_state.msgs.append({
+        "role": "assistant",
+        "content": answer,
+        "meta": sources_md
+    })
